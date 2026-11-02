@@ -84,6 +84,7 @@ export default function GoldChart({
 }: GoldChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const candleTimesRef = useRef<number[]>([]);
 
   // Series refs
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -279,6 +280,7 @@ export default function GoldChart({
         }
         chartRef.current = null;
         candleSeriesRef.current = null;
+        candleTimesRef.current = [];
         markersPrimitiveRef.current = null;
       }
     };
@@ -299,7 +301,21 @@ export default function GoldChart({
         low: c.low,
         close: c.close,
       }));
-      candleSeries.setData(chartData);
+      const timeScale = chartRef.current?.timeScale();
+      const visibleRange = timeScale?.getVisibleLogicalRange() ?? null;
+      const previousTimes = candleTimesRef.current;
+      const sameCandleWindow =
+        previousTimes.length === chartData.length &&
+        previousTimes.every((time, index) => time === chartData[index].time);
+
+      // Live ticks usually only change the current candle. Update that point
+      // instead of replacing the entire series, preserving the user's viewport.
+      if (sameCandleWindow && previousTimes.length > 0) {
+        candleSeries.update(chartData[chartData.length - 1]);
+      } else {
+        candleSeries.setData(chartData);
+        candleTimesRef.current = chartData.map((candle) => candle.time as number);
+      }
 
       // Compute and feed Bollinger Bands
       const bbData = calculateBollingerBands(cleanCandles, 20, 2);
@@ -402,6 +418,12 @@ export default function GoldChart({
         markersPrimitiveRef.current = createSeriesMarkers(candleSeries, sortedMarkers);
       } else {
         markersPrimitiveRef.current.setMarkers(sortedMarkers);
+      }
+
+      // A full history replacement can reset the visible window. Restore it
+      // when possible so market refreshes do not interrupt zooming or panning.
+      if (visibleRange) {
+        timeScale?.setVisibleLogicalRange(visibleRange);
       }
     } catch (err) {
       console.warn('Chart data update caught:', err);
