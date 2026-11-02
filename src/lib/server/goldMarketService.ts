@@ -1,28 +1,5 @@
 import { Candle, TimeFrame } from '@/types/trading';
-import { SPOT_TIMEFRAME_MAP, SPOT_GOLD_SYMBOL, BASE_GOLD_PRICE } from '@/constants/trading';
-
-interface YahooChartPayload {
-  chart?: {
-    result?: Array<{
-      meta?: {
-        regularMarketPrice?: number;
-        regularMarketDayHigh?: number;
-        regularMarketDayLow?: number;
-        previousClose?: number;
-      };
-      timestamp?: number[];
-      indicators?: {
-        quote?: Array<{
-          open?: (number | null)[];
-          high?: (number | null)[];
-          low?: (number | null)[];
-          close?: (number | null)[];
-          volume?: (number | null)[];
-        }>;
-      };
-    }>;
-  };
-}
+import { BASE_GOLD_PRICE } from '@/constants/trading';
 
 export interface FetchedMarketData {
   candles: Candle[];
@@ -33,65 +10,77 @@ export interface FetchedMarketData {
   provider: string;
 }
 
+interface MetaTraderPrice {
+  bid?: number;
+  ask?: number;
+  time?: string;
+}
+
+interface MetaTraderCandle {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  tickVolume?: number;
+  volume?: number;
+}
+
+function getMetaApiConfig() {
+  const token = process.env.METAAPI_TOKEN;
+  const accountId = process.env.METAAPI_ACCOUNT_ID;
+  if (!token || !accountId) {
+    throw new Error('Feed MetaTrader belum dikonfigurasi. Isi METAAPI_TOKEN dan METAAPI_ACCOUNT_ID.');
+  }
+  return {
+    token,
+    accountId,
+    symbol: process.env.MT5_GOLD_SYMBOL || 'XAUUSD',
+    clientBaseUrl: (process.env.METAAPI_BASE_URL || 'https://mt-client-api-v1.new-york.agiliumtrade.ai').replace(/\/$/, ''),
+    marketDataBaseUrl: (process.env.METAAPI_MARKET_DATA_BASE_URL || 'https://mt-market-data-client-api-v1.new-york.agiliumtrade.ai').replace(/\/$/, ''),
+  };
+}
+
+async function fetchMetaTraderPrice(): Promise<{ price: number; time: string }> {
+  const config = getMetaApiConfig();
+  const url = `${config.clientBaseUrl}/users/current/accounts/${encodeURIComponent(config.accountId)}/symbols/${encodeURIComponent(config.symbol)}/current-price?keepSubscription=true`;
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json', 'auth-token': config.token },
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`MetaTrader API mengembalikan HTTP ${response.status}. Periksa akun dan simbol ${config.symbol}.`);
+
+  const quote: MetaTraderPrice = await response.json();
+  if (typeof quote.bid !== 'number' || typeof quote.ask !== 'number' || quote.bid <= 0 || quote.ask <= 0) {
+    throw new Error(`Kuotasi MetaTrader untuk ${config.symbol} tidak valid.`);
+  }
+  return { price: Number(((quote.bid + quote.ask) / 2).toFixed(2)), time: quote.time || new Date().toISOString() };
+}
+
 /**
  * Fetch raw candle array from Physical Spot Gold market (XAU/USD Spot • 1:1 LBMA Gold)
  */
 export async function fetchSpotGoldData(timeframe: TimeFrame): Promise<{
   candles: Candle[];
-  meta?: {
-    regularMarketDayHigh?: number;
-    regularMarketDayLow?: number;
-    previousClose?: number;
-    regularMarketPrice?: number;
-  };
 }> {
-  const cfg = SPOT_TIMEFRAME_MAP[timeframe] || SPOT_TIMEFRAME_MAP['1h'];
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${SPOT_GOLD_SYMBOL}?interval=${cfg.interval}&range=${cfg.range}`;
-
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      Accept: 'application/json',
-    },
-    next: { revalidate: 10 },
+  const config = getMetaApiConfig();
+  const url = `${config.marketDataBaseUrl}/users/current/accounts/${encodeURIComponent(config.accountId)}/historical-market-data/symbols/${encodeURIComponent(config.symbol)}/timeframes/${timeframe}/candles?limit=250`;
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json', 'auth-token': config.token },
+    cache: 'no-store',
   });
-
-  if (!res.ok) {
-    throw new Error(`Spot Gold HTTP status: ${res.status}`);
-  }
-
-  const payload: YahooChartPayload = await res.json();
-  const result = payload.chart?.result?.[0];
-
-  if (!result || !result.timestamp || !result.indicators?.quote?.[0]) {
-    throw new Error('Format data Pasar Spot Emas tidak valid.');
-  }
-
-  const timestamps = result.timestamp;
-  const quote = result.indicators.quote[0];
-  const candles: Candle[] = [];
-
-  for (let i = 0; i < timestamps.length; i++) {
-    const o = quote.open?.[i];
-    const h = quote.high?.[i];
-    const l = quote.low?.[i];
-    const c = quote.close?.[i];
-    const v = quote.volume?.[i] ?? 100;
-
-    if (o != null && h != null && l != null && c != null) {
-      candles.push({
-        time: timestamps[i],
-        open: Number(o.toFixed(2)),
-        high: Number(h.toFixed(2)),
-        low: Number(l.toFixed(2)),
-        close: Number(c.toFixed(2)),
-        volume: v,
-      });
-    }
-  }
-
-  return { candles, meta: result.meta };
+  if (!response.ok) throw new Error(`Data candle MetaTrader mengembalikan HTTP ${response.status}. Periksa simbol ${config.symbol}.`);
+  const data: MetaTraderCandle[] = await response.json();
+  const candles = data.map((candle) => ({
+    time: Math.floor(new Date(candle.time).getTime() / 1000),
+    open: Number(candle.open.toFixed(2)),
+    high: Number(candle.high.toFixed(2)),
+    low: Number(candle.low.toFixed(2)),
+    close: Number(candle.close.toFixed(2)),
+    volume: candle.tickVolume ?? candle.volume ?? 0,
+  })).filter((candle) => Number.isFinite(candle.time));
+  if (!candles.length) throw new Error(`MetaTrader belum memberikan candle untuk ${config.symbol}.`);
+  return { candles };
 }
 
 /**
@@ -140,40 +129,20 @@ export function aggregateCandlesTo4H(rawCandles: Candle[]): Candle[] {
 }
 
 /**
- * Fetch spot price from Gold-API (XAU/USD Spot)
- */
-export async function fetchSpotPrice(): Promise<number | null> {
-  try {
-    const res = await fetch('https://api.gold-api.com/price/XAU', {
-      headers: { Accept: 'application/json' },
-      next: { revalidate: 5 },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (typeof data.price === 'number') {
-        return Number(data.price.toFixed(2));
-      }
-    }
-  } catch {
-    // fallback
-  }
-  return null;
-}
-
-/**
  * High-level service function to obtain real-time SPOT Gold market dataset
  */
 export async function getLiveGoldMarketData(timeframe: TimeFrame): Promise<FetchedMarketData> {
-  const { candles: rawCandles, meta } = await fetchSpotGoldData(timeframe);
+  const [{ candles: rawCandles }, quote] = await Promise.all([
+    fetchSpotGoldData(timeframe),
+    fetchMetaTraderPrice(),
+  ]);
 
   let finalCandles = timeframe === '4h' ? aggregateCandlesTo4H(rawCandles) : rawCandles;
   if (finalCandles.length > 250) {
     finalCandles = finalCandles.slice(finalCandles.length - 250);
   }
 
-  // Pure spot price from Gold-API XAU or Spot Candle close
-  const latestCandleClose = finalCandles[finalCandles.length - 1]?.close ?? BASE_GOLD_PRICE;
-  const spotPrice = (await fetchSpotPrice()) ?? meta?.regularMarketPrice ?? latestCandleClose;
+  const spotPrice = quote.price;
 
   // Align latest spot candle close with active spot fixing
   if (finalCandles.length > 0) {
@@ -186,15 +155,15 @@ export async function getLiveGoldMarketData(timeframe: TimeFrame): Promise<Fetch
     };
   }
 
-  const prevClose = meta?.previousClose ?? finalCandles[0]?.open ?? spotPrice;
+  const prevClose = finalCandles.length > 1 ? finalCandles[finalCandles.length - 2].close : spotPrice;
   const dailyChangePercent = Number((((spotPrice - prevClose) / prevClose) * 100).toFixed(2));
 
   return {
     candles: finalCandles,
     currentPrice: spotPrice,
-    dailyHigh: meta?.regularMarketDayHigh ?? Number((spotPrice * 1.006).toFixed(2)),
-    dailyLow: meta?.regularMarketDayLow ?? Number((spotPrice * 0.994).toFixed(2)),
+    dailyHigh: finalCandles.length ? Math.max(...finalCandles.map((candle) => candle.high), spotPrice) : spotPrice,
+    dailyLow: finalCandles.length ? Math.min(...finalCandles.map((candle) => candle.low), spotPrice) : spotPrice,
     dailyChangePercent,
-    provider: 'Pasar Spot Emas Dunia (XAU/USD Spot • London LBMA)',
+    provider: `MetaTrader 5 (${process.env.MT5_GOLD_SYMBOL || 'XAUUSD'}) · ${quote.time}`,
   };
 }

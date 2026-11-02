@@ -36,31 +36,13 @@ export async function fetchLiveGoldMarketData(
       cache: 'no-store',
     });
 
-    if (res.ok) {
-      const data = await res.json();
-      if (data.success && Array.isArray(data.candles) && data.candles.length >= 20) {
-        return data as RealMarketResponse;
-      }
-    }
-  } catch {
-    // network or offline fallback
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Feed MetaTrader tidak tersedia.');
+    if (Array.isArray(data.candles) && data.candles.length > 0) return data as RealMarketResponse;
+    throw new Error('Feed MetaTrader belum mengirim data candle.');
+  } catch (error) {
+    throw error instanceof Error ? error : new Error('Feed MetaTrader tidak tersedia.');
   }
-
-  // Graceful fallback to calibrated synthetic spot data
-  const fallbackCandles = generateGoldCandles(timeframe, 150);
-  const lastPrice = fallbackCandles[fallbackCandles.length - 1]?.close ?? BASE_GOLD_PRICE;
-
-  return {
-    success: true,
-    source: 'FALLBACK',
-    provider: 'Simulasi Terkalibrasi Pasar Spot',
-    currentPrice: lastPrice,
-    dailyHigh: Number((lastPrice + 20.5).toFixed(2)),
-    dailyLow: Number((lastPrice - 22.8).toFixed(2)),
-    dailyChangePercent: +0.48,
-    candles: fallbackCandles,
-    timestamp: Date.now(),
-  };
 }
 
 /**
