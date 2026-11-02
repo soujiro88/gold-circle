@@ -1,5 +1,34 @@
 import { Candle, TimeFrame } from '@/types/trading';
-import { BASE_GOLD_PRICE } from '@/constants/trading';
+import { SPOT_TIMEFRAME_MAP, SPOT_GOLD_SYMBOL } from '@/constants/trading';
+
+interface YahooChartPayload {
+  chart?: {
+    result?: Array<{
+      timestamp?: number[];
+      indicators?: {
+        quote?: Array<{
+          open?: (number | null)[];
+          high?: (number | null)[];
+          low?: (number | null)[];
+          close?: (number | null)[];
+          volume?: (number | null)[];
+        }>;
+      };
+    }>;
+  };
+}
+interface GoldApiQuote {
+  timestamp?: number;
+  datetime?: string;
+  price?: number;
+  bid?: number;
+  ask?: number;
+  prev_close_price?: number;
+  high_price?: number;
+  low_price?: number;
+  chp?: number;
+  change_percent?: number;
+}
 
 export interface FetchedMarketData {
   candles: Candle[];
@@ -10,160 +39,91 @@ export interface FetchedMarketData {
   provider: string;
 }
 
-interface MetaTraderPrice {
-  bid?: number;
-  ask?: number;
-  time?: string;
-}
+async function fetchGoldApiQuote(): Promise<GoldApiQuote> {
+  const apiKey = process.env.GOLDAPI_API_KEY;
+  if (!apiKey) throw new Error('GoldAPI belum dikonfigurasi. Isi GOLDAPI_API_KEY di environment server.');
 
-interface MetaTraderCandle {
-  time: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  tickVolume?: number;
-  volume?: number;
-}
-
-function getMetaApiConfig() {
-  const token = process.env.METAAPI_TOKEN;
-  const accountId = process.env.METAAPI_ACCOUNT_ID;
-  if (!token || !accountId) {
-    throw new Error('Feed MetaTrader belum dikonfigurasi. Isi METAAPI_TOKEN dan METAAPI_ACCOUNT_ID.');
-  }
-  return {
-    token,
-    accountId,
-    symbol: process.env.MT5_GOLD_SYMBOL || 'XAUUSD',
-    clientBaseUrl: (process.env.METAAPI_BASE_URL || 'https://mt-client-api-v1.new-york.agiliumtrade.ai').replace(/\/$/, ''),
-    marketDataBaseUrl: (process.env.METAAPI_MARKET_DATA_BASE_URL || 'https://mt-market-data-client-api-v1.new-york.agiliumtrade.ai').replace(/\/$/, ''),
-  };
-}
-
-async function fetchMetaTraderPrice(): Promise<{ price: number; time: string }> {
-  const config = getMetaApiConfig();
-  const url = `${config.clientBaseUrl}/users/current/accounts/${encodeURIComponent(config.accountId)}/symbols/${encodeURIComponent(config.symbol)}/current-price?keepSubscription=true`;
-  const response = await fetch(url, {
-    headers: { Accept: 'application/json', 'auth-token': config.token },
-    cache: 'no-store',
+  const response = await fetch('https://www.goldapi.io/api/price/XAU/USD', {
+    headers: { Accept: 'application/json', 'x-access-token': apiKey },
+    next: { revalidate: 30 },
   });
-  if (!response.ok) throw new Error(`MetaTrader API mengembalikan HTTP ${response.status}. Periksa akun dan simbol ${config.symbol}.`);
+  if (!response.ok) throw new Error(`GoldAPI mengembalikan HTTP ${response.status}. Periksa API key dan kuota.`);
 
-  const quote: MetaTraderPrice = await response.json();
-  if (typeof quote.bid !== 'number' || typeof quote.ask !== 'number' || quote.bid <= 0 || quote.ask <= 0) {
-    throw new Error(`Kuotasi MetaTrader untuk ${config.symbol} tidak valid.`);
+  const quote: GoldApiQuote = await response.json();
+  if (typeof quote.price !== 'number' || quote.price <= 0) {
+    throw new Error('GoldAPI tidak mengirim harga XAU/USD yang valid.');
   }
-  return { price: Number(((quote.bid + quote.ask) / 2).toFixed(2)), time: quote.time || new Date().toISOString() };
+  return quote;
 }
 
-/**
- * Fetch raw candle array from Physical Spot Gold market (XAU/USD Spot • 1:1 LBMA Gold)
- */
-export async function fetchSpotGoldData(timeframe: TimeFrame): Promise<{
-  candles: Candle[];
-}> {
-  const config = getMetaApiConfig();
-  const url = `${config.marketDataBaseUrl}/users/current/accounts/${encodeURIComponent(config.accountId)}/historical-market-data/symbols/${encodeURIComponent(config.symbol)}/timeframes/${timeframe}/candles?limit=250`;
+async function fetchSpotGoldCandles(timeframe: TimeFrame): Promise<Candle[]> {
+  const cfg = SPOT_TIMEFRAME_MAP[timeframe] || SPOT_TIMEFRAME_MAP['1h'];
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${SPOT_GOLD_SYMBOL}?interval=${cfg.interval}&range=${cfg.range}`;
   const response = await fetch(url, {
-    headers: { Accept: 'application/json', 'auth-token': config.token },
-    cache: 'no-store',
+    headers: { Accept: 'application/json' },
+    next: { revalidate: 30 },
   });
-  if (!response.ok) throw new Error(`Data candle MetaTrader mengembalikan HTTP ${response.status}. Periksa simbol ${config.symbol}.`);
-  const data: MetaTraderCandle[] = await response.json();
-  const candles = data.map((candle) => ({
-    time: Math.floor(new Date(candle.time).getTime() / 1000),
-    open: Number(candle.open.toFixed(2)),
-    high: Number(candle.high.toFixed(2)),
-    low: Number(candle.low.toFixed(2)),
-    close: Number(candle.close.toFixed(2)),
-    volume: candle.tickVolume ?? candle.volume ?? 0,
-  })).filter((candle) => Number.isFinite(candle.time));
-  if (!candles.length) throw new Error(`MetaTrader belum memberikan candle untuk ${config.symbol}.`);
-  return { candles };
+  if (!response.ok) throw new Error(`Data candle historis mengembalikan HTTP ${response.status}.`);
+
+  const payload: YahooChartPayload = await response.json();
+  const result = payload.chart?.result?.[0];
+  const timestamps = result?.timestamp;
+  const quote = result?.indicators?.quote?.[0];
+  if (!timestamps || !quote) throw new Error('Format candle historis XAU/USD tidak valid.');
+
+  const candles: Candle[] = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    const open = quote.open?.[i];
+    const high = quote.high?.[i];
+    const low = quote.low?.[i];
+    const close = quote.close?.[i];
+    if (open == null || high == null || low == null || close == null) continue;
+    candles.push({
+      time: timestamps[i],
+      open: Number(open.toFixed(2)),
+      high: Number(high.toFixed(2)),
+      low: Number(low.toFixed(2)),
+      close: Number(close.toFixed(2)),
+      volume: quote.volume?.[i] ?? 0,
+    });
+  }
+  return candles;
 }
 
-/**
- * Aggregate 60m candles into 4-hour candles for spot market
- */
-export function aggregateCandlesTo4H(rawCandles: Candle[]): Candle[] {
-  if (rawCandles.length === 0) return [];
-  const FOUR_HOURS = 14400;
-  const aggregated: Candle[] = [];
+export async function getLiveGoldMarketData(timeframe: TimeFrame): Promise<FetchedMarketData> {
+  const [quote, candles] = await Promise.all([
+    fetchGoldApiQuote(),
+    fetchSpotGoldCandles(timeframe).catch(() => []),
+  ]);
+  const currentPrice = Number(quote.price!.toFixed(2));
 
-  let currentGroup: Candle[] = [];
-  let currentPeriodStart = Math.floor(rawCandles[0].time / FOUR_HOURS) * FOUR_HOURS;
-
-  for (const candle of rawCandles) {
-    const period = Math.floor(candle.time / FOUR_HOURS) * FOUR_HOURS;
-    if (period === currentPeriodStart) {
-      currentGroup.push(candle);
-    } else {
-      if (currentGroup.length > 0) {
-        aggregated.push({
-          time: currentPeriodStart,
-          open: currentGroup[0].open,
-          high: Math.max(...currentGroup.map((c) => c.high)),
-          low: Math.min(...currentGroup.map((c) => c.low)),
-          close: currentGroup[currentGroup.length - 1].close,
-          volume: currentGroup.reduce((acc, c) => acc + c.volume, 0),
-        });
-      }
-      currentPeriodStart = period;
-      currentGroup = [candle];
-    }
-  }
-
-  if (currentGroup.length > 0) {
-    aggregated.push({
-      time: currentPeriodStart,
-      open: currentGroup[0].open,
-      high: Math.max(...currentGroup.map((c) => c.high)),
-      low: Math.min(...currentGroup.map((c) => c.low)),
-      close: currentGroup[currentGroup.length - 1].close,
-      volume: currentGroup.reduce((acc, c) => acc + c.volume, 0),
+  if (candles.length) {
+    const lastIndex = candles.length - 1;
+    candles[lastIndex] = {
+      ...candles[lastIndex],
+      close: currentPrice,
+      high: Math.max(candles[lastIndex].high, currentPrice),
+      low: Math.min(candles[lastIndex].low, currentPrice),
+    };
+  } else {
+    candles.push({
+      time: Math.floor((quote.timestamp ?? Date.now() / 1000) / 60) * 60,
+      open: currentPrice,
+      high: currentPrice,
+      low: currentPrice,
+      close: currentPrice,
+      volume: 0,
     });
   }
 
-  return aggregated;
-}
-
-/**
- * High-level service function to obtain real-time SPOT Gold market dataset
- */
-export async function getLiveGoldMarketData(timeframe: TimeFrame): Promise<FetchedMarketData> {
-  const [{ candles: rawCandles }, quote] = await Promise.all([
-    fetchSpotGoldData(timeframe),
-    fetchMetaTraderPrice(),
-  ]);
-
-  let finalCandles = timeframe === '4h' ? aggregateCandlesTo4H(rawCandles) : rawCandles;
-  if (finalCandles.length > 250) {
-    finalCandles = finalCandles.slice(finalCandles.length - 250);
-  }
-
-  const spotPrice = quote.price;
-
-  // Align latest spot candle close with active spot fixing
-  if (finalCandles.length > 0) {
-    const lastIdx = finalCandles.length - 1;
-    finalCandles[lastIdx] = {
-      ...finalCandles[lastIdx],
-      close: spotPrice,
-      high: Math.max(finalCandles[lastIdx].high, spotPrice),
-      low: Math.min(finalCandles[lastIdx].low, spotPrice),
-    };
-  }
-
-  const prevClose = finalCandles.length > 1 ? finalCandles[finalCandles.length - 2].close : spotPrice;
-  const dailyChangePercent = Number((((spotPrice - prevClose) / prevClose) * 100).toFixed(2));
-
+  const previousClose = quote.prev_close_price || currentPrice;
+  const dailyChangePercent = quote.chp ?? quote.change_percent ?? Number((((currentPrice - previousClose) / previousClose) * 100).toFixed(2));
   return {
-    candles: finalCandles,
-    currentPrice: spotPrice,
-    dailyHigh: finalCandles.length ? Math.max(...finalCandles.map((candle) => candle.high), spotPrice) : spotPrice,
-    dailyLow: finalCandles.length ? Math.min(...finalCandles.map((candle) => candle.low), spotPrice) : spotPrice,
-    dailyChangePercent,
-    provider: `MetaTrader 5 (${process.env.MT5_GOLD_SYMBOL || 'XAUUSD'}) · ${quote.time}`,
+    candles: candles.slice(-250),
+    currentPrice,
+    dailyHigh: quote.high_price ?? currentPrice,
+    dailyLow: quote.low_price ?? currentPrice,
+    dailyChangePercent: Number(dailyChangePercent.toFixed(2)),
+    provider: `GoldAPI.io XAU/USD${quote.datetime ? ` · ${quote.datetime}` : ''}`,
   };
 }

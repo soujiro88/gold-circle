@@ -17,7 +17,7 @@ export function useGoldMarket() {
 
   // Real Market Data Feed States
   const [dataSource, setDataSource] = useState<'REAL_MARKET' | 'FALLBACK'>('FALLBACK');
-  const [dataProvider, setDataProvider] = useState<string>('Menunggu koneksi MetaTrader 5');
+  const [dataProvider, setDataProvider] = useState<string>('Menunggu koneksi GoldAPI.io');
   const [isLoadingMarket, setIsLoadingMarket] = useState<boolean>(true);
   const [realStats, setRealStats] = useState<{
     dailyHigh: number;
@@ -56,7 +56,7 @@ export function useGoldMarket() {
     } catch (err) {
       console.error('Failed to load market data:', err);
       setDataSource('FALLBACK');
-      setDataProvider(err instanceof Error ? err.message : 'Feed MetaTrader tidak tersedia');
+      setDataProvider(err instanceof Error ? err.message : 'Feed GoldAPI.io tidak tersedia');
     } finally {
       setIsLoadingMarket(false);
     }
@@ -109,9 +109,9 @@ export function useGoldMarket() {
         })
         .catch((err: unknown) => {
           setDataSource('FALLBACK');
-          setDataProvider(err instanceof Error ? err.message : 'Feed MetaTrader terputus');
+          setDataProvider(err instanceof Error ? err.message : 'Feed GoldAPI.io terputus');
         });
-    }, 5000);
+    }, 60000);
 
     return () => clearInterval(syncInterval);
   }, [isLive, timeframe, soundEnabled, candles]);

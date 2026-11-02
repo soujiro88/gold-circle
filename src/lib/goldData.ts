@@ -37,11 +37,11 @@ export async function fetchLiveGoldMarketData(
     });
 
     const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Feed MetaTrader tidak tersedia.');
+    if (!res.ok || !data.success) throw new Error(data.error || 'Feed GoldAPI.io tidak tersedia.');
     if (Array.isArray(data.candles) && data.candles.length > 0) return data as RealMarketResponse;
-    throw new Error('Feed MetaTrader belum mengirim data candle.');
+    throw new Error('Feed GoldAPI.io belum mengirim data harga.');
   } catch (error) {
-    throw error instanceof Error ? error : new Error('Feed MetaTrader tidak tersedia.');
+    throw error instanceof Error ? error : new Error('Feed GoldAPI.io tidak tersedia.');
   }
 }
 
