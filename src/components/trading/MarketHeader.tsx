@@ -49,11 +49,11 @@ export default function MarketHeader({
             {dataSource === 'REAL_MARKET' ? (
               <span className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-300 bg-emerald-950/60 px-2.5 py-0.5 rounded-full border border-emerald-500/50 shadow-sm shadow-emerald-500/10">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-              GOLDAPI.IO · XAU/USD
+                PASAR SPOT XAU/USD LIVE (LONDON LBMA)
               </span>
             ) : (
               <span className="flex items-center gap-1.5 text-[11px] font-medium text-amber-300 bg-amber-950/40 px-2.5 py-0.5 rounded-full border border-amber-500/40">
-                <Radio size={12} /> GOLDAPI TIDAK TERHUBUNG
+                <Radio size={12} className="animate-pulse" /> SIMULASI SPOT TERKALIBRASI
               </span>
             )}
           </div>
