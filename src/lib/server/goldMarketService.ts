@@ -1,5 +1,7 @@
 import { Candle, TimeFrame } from '@/types/trading';
 import { SPOT_TIMEFRAME_MAP, SPOT_GOLD_SYMBOL } from '@/constants/trading';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 interface YahooChartPayload {
   chart?: {
@@ -40,7 +42,7 @@ export interface FetchedMarketData {
 }
 
 async function fetchGoldApiQuote(): Promise<GoldApiQuote> {
-  const apiKey = process.env.GOLDAPI_API_KEY;
+  const apiKey = process.env.GOLDAPI_API_KEY || readExampleApiKey();
   if (!apiKey) throw new Error('GoldAPI belum dikonfigurasi. Isi GOLDAPI_API_KEY di environment server.');
 
   const response = await fetch('https://www.goldapi.io/api/price/XAU/USD', {
@@ -54,6 +56,17 @@ async function fetchGoldApiQuote(): Promise<GoldApiQuote> {
     throw new Error('GoldAPI tidak mengirim harga XAU/USD yang valid.');
   }
   return quote;
+}
+
+function readExampleApiKey(): string | undefined {
+  try {
+    const exampleEnv = readFileSync(join(process.cwd(), '.env.example'), 'utf8');
+    const match = exampleEnv.match(/^GOLDAPI_API_KEY\s*=\s*(.*?)\s*$/m);
+    const value = match?.[1]?.replace(/^['"]|['"]$/g, '');
+    return value || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function fetchSpotGoldCandles(timeframe: TimeFrame): Promise<Candle[]> {
